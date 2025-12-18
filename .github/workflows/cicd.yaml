@@ -1,89 +1,71 @@
-name: advert-workflow
+name: cicd-workflow
 
 on:
-push:
-branches: [ "Dev" ]
-workflow_dispatch:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
 jobs:
-build-and-push:
-runs-on: ubuntu-latest
-name: containerise-model
-steps:
-- name: 1. Checkout Repository
-uses: actions/checkout@v4
+  # Build, train, test and push Docker image
+  containersize-model:
+    name: build-and-push
+    runs-on: ubuntu-latest
 
-- name: 2. Set up Python
-uses: actions/setup-python@v4
-with:
-python-version: '3.9'
+    steps:
+      # 1. Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-- name: 3. Install dependencies
-run: |
-pip install -r requirements.txt
-pip install pytest
+      # 2. Log in to Docker Hub (optional)
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{secrets.DOCKER_USERNAME}}
+          password: ${{secrets.DOCKER_PASSWORD}}
 
-- name: 4. Set up Docker Buildx
-uses: docker/setup-buildx-action@v3
+      # 3. Build the Docker image
+      - name: Build Docker image
+        run: |
+          docker build -t advertising24:latest .
 
-- name: 5. Log in to Docker Hub
-uses: docker/login-action@v3
-with:
-username: ${{ secrets.DOCKER_USERNAME }}
-password: ${{ secrets.DOCKER_PASSWORD }}
+      # 4. Run container to train/test inside
+      - name: Train and Test inside Docker
+        run: |
+          docker run --rm advertising24:latest python train.py
 
-- name: 6. Build and Push Docker Image
-uses: docker/build-push-action@v5
-with:
-context: .
-file: Dockerfile
-push: true
-tags: |
-${{ secrets.DOCKER_USERNAME }}/advertising:latest
-${{ secrets.DOCKER_USERNAME }}/advertising:${{ github.sha }}
-deploy-to-minikube:
-runs-on: ubuntu-latest
-name: pull-image-job
-needs: build-and-push
-steps:
-- name: 1. Checkout Repository
-uses: actions/checkout@v4
+      # 5. Tag and push image to Docker Hub
+      - name: Push Docker image
+        run: |
+          docker tag advertising24:latest ${{ secrets.DOCKER_USERNAME }}/advertising24:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/advertising24:latest
 
-- name: 2. List files in the repository (for debugging)
-run: |
-echo "Current directory: $(pwd)"
-echo "Listing all files..."
-ls -R .
+  # Pull image and run it for deployment testing
+  pull-image-job:
+    name: pull-and-run
+    needs: containersize-model
+    runs-on: ubuntu-latest
 
-- name: 3. Set up and Start Minikube
-uses: medyagh/setup-minikube@latest
+    steps:
+      # Checkout
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-- name: 4. Update Deployment with new Image Tag
-run: |
-sed -i "s|__IMAGE_NAME__|${{ env.DOCKER_IMAGE }}:${{ needs.build-and-push.outputs.image_tag }}|g" deployment.yaml
-echo "--- Updated deployment.yaml (deployment.yaml) ---"
-cat deployment.yaml
+      # Login to Docker Hub
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-- name: 5. Deploy Application to Minikube
-run: |
-echo "Applying Kubernetes manifests..."
-kubectl apply -f deployment.yaml
-kubectl apply -f service.yaml
+      # Pull the pushed image
+      - name: Pull Docker image
+        run: |
+          docker pull ${{ secrets.DOCKER_USERNAME }}/advertising24:latest
 
-- name: 6. Verify Deployment
-run: |
-echo "Waiting for deployment to be ready..."
-kubectl rollout status deployment/score-deployment --timeout=120s
-echo -e "\n--- Pod Status ---"
-kubectl get pods
-echo -e "\n--- Service Status ---"
-kubectl get service
-- name: 7. Start Background Services
-run: |
-# Requirement: Minikube Tunnel
-nohup minikube tunnel > tunnel.log 2>&1 &
-
-- name: 8. Rerun the services
-run: |
-#rerunning the serivces
-echo -e "\n--- Service---"
-kubectl get service
+      # Run the image and test prediction endpoint
+      - name: Run container
+        run: |
+          docker run -d -p 5000:5000 --name advertising24test ${{ secrets.DOCKER_USERNAME }}/advertising24:latest
+          sleep 10
+          curl http://localhost:5000
